@@ -1,0 +1,4 @@
+torch==2.0
+torchvision==0.15.1
+numpy==1.24.1
+segmentation-models-pytorch @ git+https://github.com/qubvel/segmentation_models.pytorch@8523324c116dcf7be6bddb73bf4eb1779ef6e611
