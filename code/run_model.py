@@ -1,4 +1,4 @@
-from functions import load_model, load_input_data, run_inference, visualize_pred
+from ..functions import load_model, load_input_data, run_inference, visualize_pred
 import torch
 
 """ Load the model """
