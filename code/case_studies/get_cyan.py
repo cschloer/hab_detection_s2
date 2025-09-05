@@ -95,15 +95,27 @@ def get_copernicus_access_token():
     return response.json()["access_token"]
 
 
-def search_sentinel2(bbox, date, cloud_cover=20):
-    """Search for Sentinel-2 products using Copernicus Data Space Ecosystem"""
+def search_sentinel2(bbox, date, cloud_cover=20, date_range_days=3):
+    """Search for Sentinel-2 products using Copernicus Data Space Ecosystem
+
+    Args:
+        bbox: Bounding box [min_lon, max_lat, max_lon, min_lat]
+        date: Target date (datetime object)
+        cloud_cover: Maximum cloud cover percentage
+        date_range_days: Number of days to search before/after target date (default 3)
+    """
+    from datetime import timedelta
+
     access_token = get_copernicus_access_token()
 
     # Convert bbox to WKT polygon
     min_lon, max_lat, max_lon, min_lat = bbox
     footprint = f"POLYGON(({min_lon} {min_lat},{min_lon} {max_lat},{max_lon} {max_lat},{max_lon} {min_lat},{min_lon} {min_lat}))"
 
-    # Search for products from the exact date only
+    # First, try to find products for the exact date
+    print(
+        f"Searching for Sentinel-2 products for exact date: {date.strftime('%Y-%m-%d')}"
+    )
     start_date = date.strftime("%Y-%m-%dT00:00:00.000Z")
     end_date = date.strftime("%Y-%m-%dT23:59:59.999Z")
 
@@ -128,12 +140,75 @@ def search_sentinel2(bbox, date, cloud_cover=20):
         )
 
     results = response.json()
-    if not results.get("value"):
-        raise ValueError(
-            f"No Sentinel-2 products found for date {date.strftime('%Y-%m-%d')} and bbox {bbox}"
+    if results.get("value"):
+        print(f"✓ Found Sentinel-2 product for exact date: {date.strftime('%Y-%m-%d')}")
+        return results["value"][0]
+
+    # If no products found for exact date, search within date range
+    print(
+        f"No products found for exact date. Searching within ±{date_range_days} days..."
+    )
+
+    search_start_date = date - timedelta(days=date_range_days)
+    search_end_date = date + timedelta(days=date_range_days)
+
+    range_start = search_start_date.strftime("%Y-%m-%dT00:00:00.000Z")
+    range_end = search_end_date.strftime("%Y-%m-%dT23:59:59.999Z")
+
+    params["$filter"] = (
+        f"Collection/Name eq 'SENTINEL-2' and "
+        f"contains(Name,'MSIL2A') and "
+        f"ContentDate/Start ge {range_start} and ContentDate/Start le {range_end} and "
+        f"OData.CSC.Intersects(area=geography'SRID=4326;{footprint}') and "
+        f"Attributes/OData.CSC.DoubleAttribute/any(att:att/Name eq 'cloudCover' and att/OData.CSC.DoubleAttribute/Value le {cloud_cover})"
+    )
+
+    response = requests.get(search_url, params=params, headers=headers)
+    if response.status_code != 200:
+        raise ConnectionError(
+            f"Search failed: {response.status_code} - {response.text}"
         )
 
-    # Return the most recent product
+    results = response.json()
+    if not results.get("value"):
+        raise ValueError(
+            f"No Sentinel-2 products found for date {date.strftime('%Y-%m-%d')} "
+            f"(searched ±{date_range_days} days) and bbox {bbox}"
+        )
+
+    # Log all available dates within the range
+    available_dates = []
+    for product in results["value"]:
+        product_date = product["ContentDate"]["Start"][:10]  # Extract YYYY-MM-DD
+        if product_date not in available_dates:
+            available_dates.append(product_date)
+
+    available_dates.sort()
+    print(
+        f"Available Sentinel-2 dates within ±{date_range_days} days: {', '.join(available_dates)}"
+    )
+
+    # Find the product closest to the target date
+    best_product = None
+    min_days_diff = float("inf")
+
+    for product in results["value"]:
+        product_date_str = product["ContentDate"]["Start"][:10]
+        product_date = datetime.strptime(product_date_str, "%Y-%m-%d")
+        days_diff = abs((product_date.date() - date.date()).days)
+
+        if days_diff < min_days_diff:
+            min_days_diff = days_diff
+            best_product = product
+
+    if best_product:
+        best_date = best_product["ContentDate"]["Start"][:10]
+        print(
+            f"✓ Using closest available date: {best_date} ({min_days_diff} days from target)"
+        )
+        return best_product
+
+    # This shouldn't happen if we found products above, but just in case
     return results["value"][0]
 
 
@@ -630,11 +705,14 @@ def get_and_display_cyan(
     include_sentinel2=True,
     sentinel2_cache_dir=None,
     cyan_cache_dir=None,
+    searchMode=False,
 ):
     """
     Download CyaN tile for given date and bounding box, crop it, and display it.
     Will cycle through dates until finding data with actual values (not just 0, 254, 255).
     Optionally also downloads and processes Sentinel-2 data for the same area and date.
+
+    If searchMode=True, skips Sentinel-2 processing and only downloads/displays CyaN data.
 
     Args:
         date: datetime object for the starting date
@@ -653,6 +731,10 @@ def get_and_display_cyan(
     from datetime import timedelta
 
     current_date = date
+
+    # If searchMode is enabled, skip Sentinel-2 processing
+    if searchMode:
+        include_sentinel2 = False
 
     # Set up cache directories
     if sentinel2_cache_dir is None:
@@ -768,33 +850,66 @@ def get_and_display_cyan(
                 sen2_product = search_sentinel2(bbox, current_date)
 
                 product_name = sen2_product["Name"]
-                print(f"Found Sentinel-2 product: {product_name}")
+                product_date = sen2_product["ContentDate"]["Start"][:10]
+                cyan_date = current_date.strftime("%Y-%m-%d")
 
-                # Check if we already have this product cached
-                sen2_zip_path = os.path.join(sentinel2_cache_dir, f"{product_name}.zip")
+                print(f"✓ Sentinel-2 product available: {product_date}")
 
-                if os.path.exists(sen2_zip_path):
-                    print(f"Using cached Sentinel-2 product: {sen2_zip_path}")
+                # Check if Sentinel-2 product is for the exact same date as CyaN
+                if product_date == cyan_date:
+                    print(f"✓ Sentinel-2 product matches CyaN date: {cyan_date}")
+
+                    if searchMode:
+                        # In search mode, just log but don't download
+                        print(f"  Search mode: Not downloading Sentinel-2 data")
+                        final_sen2_path = None
+                        final_sen2_rgb_path = None
+                    else:
+                        # Normal mode: download and process the data
+                        print(f"  Downloading and processing Sentinel-2 data...")
+                        sen2_zip_path = os.path.join(
+                            sentinel2_cache_dir, f"{product_name}.zip"
+                        )
+
+                        if os.path.exists(sen2_zip_path):
+                            print(f"  Using cached Sentinel-2 product: {sen2_zip_path}")
+                        else:
+                            print(
+                                f"  Downloading Sentinel-2 product to cache: {sen2_zip_path}"
+                            )
+                            download_sentinel2(sen2_product, sen2_zip_path)
+
+                        # Process bands to 20m resolution (use temp dir for processing)
+                        print("  Processing Sentinel-2 bands to 20m resolution...")
+                        sen2_processed_path = process_sentinel2_bands(
+                            sen2_zip_path, temp_dir
+                        )
+
+                        # Create high-resolution RGB composite at 10m for true color display
+                        print("  Creating high-resolution RGB composite at 10m...")
+                        sen2_rgb_path = create_rgb_composite(sen2_zip_path, temp_dir)
+
+                        # Crop both the multispectral stack and RGB composite to bounding box
+                        final_sen2_path = os.path.join(
+                            temp_dir, "sentinel2_cropped.tif"
+                        )
+                        crop_sentinel2_to_bbox(
+                            sen2_processed_path, bbox, final_sen2_path
+                        )
+
+                        final_sen2_rgb_path = os.path.join(
+                            temp_dir, "sentinel2_rgb_cropped.tif"
+                        )
+                        crop_sentinel2_to_bbox(sen2_rgb_path, bbox, final_sen2_rgb_path)
                 else:
-                    print(f"Downloading Sentinel-2 product to cache: {sen2_zip_path}")
-                    download_sentinel2(sen2_product, sen2_zip_path)
-
-                # Process bands to 20m resolution (use temp dir for processing)
-                print("Processing Sentinel-2 bands to 20m resolution...")
-                sen2_processed_path = process_sentinel2_bands(sen2_zip_path, temp_dir)
-
-                # Create high-resolution RGB composite at 10m for true color display
-                print("Creating high-resolution RGB composite at 10m...")
-                sen2_rgb_path = create_rgb_composite(sen2_zip_path, temp_dir)
-
-                # Crop both the multispectral stack and RGB composite to bounding box
-                final_sen2_path = os.path.join(temp_dir, "sentinel2_cropped.tif")
-                crop_sentinel2_to_bbox(sen2_processed_path, bbox, final_sen2_path)
-
-                final_sen2_rgb_path = os.path.join(
-                    temp_dir, "sentinel2_rgb_cropped.tif"
-                )
-                crop_sentinel2_to_bbox(sen2_rgb_path, bbox, final_sen2_rgb_path)
+                    print(
+                        f"✗ Sentinel-2 product date ({product_date}) does not match CyaN date ({cyan_date})"
+                    )
+                    print(
+                        f"  Not downloading Sentinel-2 data - only logging availability"
+                    )
+                    final_sen2_path = None
+                    final_sen2_rgb_path = None
 
             except Exception as e:
                 print(f"Failed to process Sentinel-2 data: {e}")
@@ -895,38 +1010,80 @@ def get_and_display_cyan(
             cyan_overlay = np.zeros_like(cyan_colored_resized)
             cyan_overlay[cyan_mask] = cyan_colored_resized[cyan_mask]
 
-            # Create 5-panel visualization (2x3 grid)
-            if model_pred is not None:
-                fig, ((ax1, ax2, ax3), (ax4, ax5, ax6)) = plt.subplots(
-                    2, 3, figsize=(21, 14)
-                )
-                ax6.axis("off")  # Hide the 6th panel
-            else:
-                fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+            # Create 2x2 visualization to match the reference image
+            fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(12, 10))
 
-            # CyAN colored
-            ax1.imshow(cyan_colored)
-            ax1.set_title("CyAN Colored")
+            # Top left: Sentinel-2 Image
+            ax1.imshow(sen2_rgb)
+            ax1.set_title("Sentinel 2 Image", fontsize=12, pad=10)
             ax1.axis("off")
 
-            # Sentinel-2 RGB (high-res)
-            ax2.imshow(sen2_rgb)
-            ax2.set_title("Sentinel-2 True Color (10m)")
+            # Top right: CyAN HAB Index
+            im2 = ax2.imshow(cyan_colored)
+            ax2.set_title("CyAN HAB Index", fontsize=12, pad=10)
             ax2.axis("off")
+            # Add colorbar for CyaN index (0-253 range)
+            cbar2 = plt.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
+            cbar2.set_label("CyaN Index", rotation=270, labelpad=15)
+            cbar2.set_ticks([0, 50, 100, 150, 200, 253])
+            cbar2.set_ticklabels(["0", "50", "100", "150", "200", "253"])
 
+            # Bottom left: CyAN HAB Class - show classified CyaN data
+            # Create CyaN classification from raw values
+            cyan_classification = np.zeros_like(cyan_array)
+            # Classify based on CyaN values (these are typical thresholds)
+            cyan_classification[cyan_array == 0] = 0  # No bloom
+            cyan_classification[(cyan_array > 0) & (cyan_array <= 100)] = (
+                100  # Low bloom
+            )
+            cyan_classification[(cyan_array > 100) & (cyan_array <= 200)] = (
+                200  # High bloom
+            )
+            cyan_classification[cyan_array > 200] = 254  # Very high bloom
+
+            # Use same colormap structure as model prediction for consistency
+            class_designation = [100, 200, 254]
+            uniq = np.unique_counts(cyan_classification)
+            print("_________________")
+            print("CYAN CLASSIFICATION")
+            print(uniq.values)
+            print(uniq.counts)
+            print("_________________")
+            uniq = np.unique_counts(cyan_colormap)
+            print("_________________")
+            print("CYAN COLORMAP")
+            print(uniq.values)
+            print(uniq.counts)
+            print("_________________")
+            cyan_custom_colormap = []
+            for i, c in enumerate(class_designation):
+                cur_color = cyan_colormap[c - 1 if i != 0 else 0]
+                cyan_custom_colormap.append(cur_color)
+            cyan_custom_colormap.append(cyan_colormap[-1])  # For very high bloom class
+            cyan_custom_colormap = np.array(cyan_custom_colormap)
+            uniq = np.unique_counts(cyan_custom_colormap)
+            print("_________________")
+            print("CYAN CUSTOM COLORMAP")
+            print(uniq.values)
+            print(uniq.counts)
+            print("_________________")
+
+            cyan_class_colored = cyan_custom_colormap[cyan_classification]
+            im3 = ax3.imshow(cyan_class_colored)
+            ax3.set_title("CyAN HAB Class", fontsize=12, pad=10)
+            ax3.axis("off")
+            # Add discrete colorbar for CyaN classification
+            from matplotlib.colors import ListedColormap
+
+            cyan_class_cmap = ListedColormap(cyan_custom_colormap / 255.0)
+            cbar3 = plt.colorbar(
+                im3, ax=ax3, fraction=0.046, pad=0.04, ticks=[0, 1, 2, 3]
+            )
+            cbar3.set_label("Class", rotation=270, labelpad=15)
+            cbar3.set_ticklabels(["0-99", "100-199", "200-253", ">253"])
+
+            # Bottom right: Prediction HAB Class - show model prediction
             if model_pred is not None:
-                # Sentinel-2 RGB with cloud/land filter (water only)
-                ax3.imshow(sen2_rgb_filtered)
-                ax3.set_title("Sentinel-2 Water Only\n(Clouds & Land → Black)")
-                ax3.axis("off")
-
-                # Overlay on filtered image
-                ax4.imshow(sen2_rgb_filtered)
-                ax4.imshow(cyan_overlay, alpha=0.6)  # Semi-transparent overlay
-                ax4.set_title("Water-Only Sentinel-2 with CyAN Overlay")
-                ax4.axis("off")
-
-                # Model prediction
                 # Apply filters to model prediction
                 ycrop, xcrop = crop_info
                 pred_height, pred_width = model_pred.shape
@@ -949,27 +1106,29 @@ def get_and_display_cyan(
                 model_pred_filtered[land_filter_resized] = 3  # Set to no-data class
 
                 # Create colormap for model prediction (same as functions.py)
-                class_designation = [100, 200, 254]
-                custom_colormap = []
+                model_custom_colormap = []
                 for i, c in enumerate(class_designation):
                     cur_color = cyan_colormap[c - 1 if i != 0 else 0]
-                    custom_colormap.append(cur_color)
-                custom_colormap.append(cyan_colormap[-1])  # For no-data class
-                custom_colormap = np.array(custom_colormap)
+                    model_custom_colormap.append(cur_color)
+                model_custom_colormap.append(cyan_colormap[-1])  # For no-data class
+                model_custom_colormap = np.array(model_custom_colormap)
 
-                ax5.imshow(custom_colormap[model_pred_filtered])
-                ax5.set_title("Model Prediction\n(HAB Detection)")
-                ax5.axis("off")
+                model_pred_colored = model_custom_colormap[model_pred_filtered]
+                im4 = ax4.imshow(model_pred_colored)
+                ax4.set_title("Prediction HAB Class", fontsize=12, pad=10)
+                ax4.axis("off")
+                # Add discrete colorbar for model prediction
+                model_class_cmap = ListedColormap(model_custom_colormap / 255.0)
+                cbar4 = plt.colorbar(
+                    im4, ax=ax4, fraction=0.046, pad=0.04, ticks=[0, 1, 2, 3]
+                )
+                cbar4.set_label("Class", rotation=270, labelpad=15)
+                cbar4.set_ticklabels(["0-99", "100-199", "200-253", ">253"])
             else:
-                # Sentinel-2 RGB with cloud/land filter (water only)
-                ax3.imshow(sen2_rgb_filtered)
-                ax3.set_title("Sentinel-2 Water Only\n(Clouds & Land → Black)")
-                ax3.axis("off")
-
-                # Overlay on filtered image
+                # Show overlay if no model prediction
                 ax4.imshow(sen2_rgb_filtered)
-                ax4.imshow(cyan_overlay, alpha=0.6)  # Semi-transparent overlay
-                ax4.set_title("Water-Only Sentinel-2 with CyAN Overlay")
+                ax4.imshow(cyan_overlay, alpha=0.6)
+                ax4.set_title("Prediction HAB Class", fontsize=12, pad=10)
                 ax4.axis("off")
 
         else:
@@ -1134,7 +1293,7 @@ if __name__ == "__main__":
         42.207955,
     ]  # Example bounding box (Michigan area)
 
-    date = datetime(2023, 7, 19)  # July 15, 2023
+    date = datetime(2019, 8, 16)  # July 15, 2023
     bbox = [
         -85.972191,
         42.472820,
@@ -1161,6 +1320,7 @@ if __name__ == "__main__":
             include_sentinel2=True,
             sentinel2_cache_dir=s2_cache_dir,
             cyan_cache_dir=cyan_cache_dir,
+            searchMode=False,
         )
 
         if len(result) == 3:  # CyAN + Sentinel-2 + date
@@ -1176,6 +1336,7 @@ if __name__ == "__main__":
         print("\nPost-processing cache status:")
         list_all_cached_products(s2_cache_dir, cyan_cache_dir)
 
+        """
         # Cache management examples:
         print("\n=== CACHE MANAGEMENT EXAMPLES ===")
         print("# List only CyAN cache:")
@@ -1184,6 +1345,7 @@ if __name__ == "__main__":
         print("clear_cyan_cache()")
         print("\n# Clear both caches:")
         print("clear_sentinel2_cache(); clear_cyan_cache()")
+        """
 
     except Exception as e:
         print(f"Error: {e}")
