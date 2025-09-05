@@ -1033,40 +1033,24 @@ def get_and_display_cyan(
             cyan_classification = np.zeros_like(cyan_array)
             # Classify based on CyaN values (these are typical thresholds)
             cyan_classification[cyan_array == 0] = 0  # No bloom
-            cyan_classification[(cyan_array > 0) & (cyan_array <= 100)] = (
-                100  # Low bloom
-            )
+            cyan_classification[(cyan_array > 0) & (cyan_array <= 100)] = 0  # Low bloom
             cyan_classification[(cyan_array > 100) & (cyan_array <= 200)] = (
-                200  # High bloom
+                1  # High bloom
             )
-            cyan_classification[cyan_array > 200] = 254  # Very high bloom
+            cyan_classification[cyan_array > 200] = 2  # Very high bloom
+            cyan_classification[cyan_array >= 254] = 3  # Land/cloud
 
             # Use same colormap structure as model prediction for consistency
             class_designation = [100, 200, 254]
             uniq = np.unique_counts(cyan_classification)
-            print("_________________")
-            print("CYAN CLASSIFICATION")
-            print(uniq.values)
-            print(uniq.counts)
-            print("_________________")
             uniq = np.unique_counts(cyan_colormap)
-            print("_________________")
-            print("CYAN COLORMAP")
-            print(uniq.values)
-            print(uniq.counts)
-            print("_________________")
             cyan_custom_colormap = []
             for i, c in enumerate(class_designation):
                 cur_color = cyan_colormap[c - 1 if i != 0 else 0]
                 cyan_custom_colormap.append(cur_color)
             cyan_custom_colormap.append(cyan_colormap[-1])  # For very high bloom class
+            # cyan_custom_colormap = np.array(cyan_custom_colormap)
             cyan_custom_colormap = np.array(cyan_custom_colormap)
-            uniq = np.unique_counts(cyan_custom_colormap)
-            print("_________________")
-            print("CYAN CUSTOM COLORMAP")
-            print(uniq.values)
-            print(uniq.counts)
-            print("_________________")
 
             cyan_class_colored = cyan_custom_colormap[cyan_classification]
             im3 = ax3.imshow(cyan_class_colored)
@@ -1293,7 +1277,7 @@ if __name__ == "__main__":
         42.207955,
     ]  # Example bounding box (Michigan area)
 
-    date = datetime(2019, 8, 16)  # July 15, 2023
+    date = datetime(2019, 7, 2)
     bbox = [
         -85.972191,
         42.472820,
