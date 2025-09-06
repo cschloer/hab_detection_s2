@@ -1,6 +1,11 @@
 import os
 import requests
 from pathlib import Path
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+import matplotlib
+import matplotlib.cm as cm
+
+
 from PIL import Image
 import subprocess
 import tempfile
@@ -699,6 +704,7 @@ def run_model_on_sentinel2(sen2_path, model_path="../model.pt"):
 def get_and_display_cyan(
     date,
     bbox,
+    image_name,
     region_id="01",
     save_path=None,
     max_days_to_try=30,
@@ -929,6 +935,24 @@ def get_and_display_cyan(
         # Apply CyAN colormap for display
         cyan_colored = cyan_colormap[cyan_array]
 
+        W = 5.8
+        plt.rcParams.update(
+            {
+                "figure.figsize": (W, W / (4 / 3)),  # 4:3 aspect ratio
+                "font.size": 12,  # Set font size to 11pt
+                "axes.labelsize": 12,  # -> axis labels
+                "legend.fontsize": 12,  # -> legends
+                "text.usetex": True,
+                "font.family": "serif",
+                "font.family": "Palatino",
+                "font.weight": "bold",
+                "text.latex.preamble": (  # LaTeX preamble
+                    r"\usepackage{lmodern}"
+                    # ... more packages if needed
+                ),
+            }
+        )
+
         # Create visualization
         if (
             final_sen2_path
@@ -1011,11 +1035,34 @@ def get_and_display_cyan(
             cyan_overlay[cyan_mask] = cyan_colored_resized[cyan_mask]
 
             # Create 2x2 visualization to match the reference image
-            fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(12, 10))
+            fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(W, W / (4 / 3)))
 
             # Top left: Sentinel-2 Image
             ax1.imshow(sen2_rgb)
             ax1.set_title("Sentinel 2 Image", fontsize=12, pad=10)
+
+            divider = make_axes_locatable(ax1)
+            cax = divider.append_axes("right", size="5%", pad=0.05)
+            cmap = matplotlib.colors.ListedColormap(
+                [
+                    "#959595",
+                    "#ecad0a",
+                    "#a90000",
+                ]
+            )
+            mappable = cm.ScalarMappable(cmap=cmap)
+            mappable.set_array([])
+            class_designation = [100, 200, 254]
+            mappable.set_clim(-0.5, len(class_designation) + 0.5)
+            colorbar = fig.colorbar(
+                mappable, cax=cax, orientation="vertical"
+            )  # , ticks=[0, 1, 2, 3, 4])
+            colorbar.set_ticks(
+                np.linspace(0, len(class_designation), len(class_designation))
+            )
+            colorbar.set_ticklabels(["0-99", "100-199", "200-253"])
+            colorbar.remove()
+
             ax1.axis("off")
 
             # Top right: CyAN HAB Index
@@ -1023,10 +1070,19 @@ def get_and_display_cyan(
             ax2.set_title("CyAN HAB Index", fontsize=12, pad=10)
             ax2.axis("off")
             # Add colorbar for CyaN index (0-253 range)
-            cbar2 = plt.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
-            cbar2.set_label("CyaN Index", rotation=270, labelpad=15)
-            cbar2.set_ticks([0, 50, 100, 150, 200, 253])
-            cbar2.set_ticklabels(["0", "50", "100", "150", "200", "253"])
+
+            divider = make_axes_locatable(ax2)
+            cax = divider.append_axes("right", size="5%", pad=0.05)
+            cmap = matplotlib.colors.ListedColormap(cyan_colormap[:-2] / 255)
+            mappable = cm.ScalarMappable(cmap=cmap)
+            mappable.set_array([])
+            mappable.set_clim(0, 1)
+            colorbar = fig.colorbar(
+                mappable, cax=cax, orientation="vertical"
+            )  # , ticks=[0, 1, 2, 3, 4])
+            colorbar.set_ticks([0, 1])
+            colorbar.set_ticklabels(["0", "253"])
+            colorbar.ax.tick_params(axis="both", which="both", length=0)
 
             # Bottom left: CyAN HAB Class - show classified CyaN data
             # Create CyaN classification from raw values
@@ -1055,16 +1111,29 @@ def get_and_display_cyan(
             cyan_class_colored = cyan_custom_colormap[cyan_classification]
             im3 = ax3.imshow(cyan_class_colored)
             ax3.set_title("CyAN HAB Class", fontsize=12, pad=10)
+            divider = make_axes_locatable(ax3)
+            cax = divider.append_axes("right", size="5%", pad=0.05)
+            cmap = matplotlib.colors.ListedColormap(
+                [
+                    "#959595",
+                    "#ecad0a",
+                    "#a90000",
+                ]
+            )
+            mappable = cm.ScalarMappable(cmap=cmap)
+            mappable.set_array([])
+            class_designation = [100, 200, 254]
+            mappable.set_clim(-0.5, len(class_designation) + 0.5)
+            colorbar = fig.colorbar(
+                mappable, cax=cax, orientation="vertical"
+            )  # , ticks=[0, 1, 2, 3, 4])
+            colorbar.set_ticks(
+                np.linspace(0, len(class_designation), len(class_designation))
+            )
+            colorbar.set_ticklabels(["0-99", "100-199", "200-253"])
+            colorbar.remove()
             ax3.axis("off")
             # Add discrete colorbar for CyaN classification
-            from matplotlib.colors import ListedColormap
-
-            cyan_class_cmap = ListedColormap(cyan_custom_colormap / 255.0)
-            cbar3 = plt.colorbar(
-                im3, ax=ax3, fraction=0.046, pad=0.04, ticks=[0, 1, 2, 3]
-            )
-            cbar3.set_label("Class", rotation=270, labelpad=15)
-            cbar3.set_ticklabels(["0-99", "100-199", "200-253", ">253"])
 
             # Bottom right: Prediction HAB Class - show model prediction
             if model_pred is not None:
@@ -1101,13 +1170,42 @@ def get_and_display_cyan(
                 im4 = ax4.imshow(model_pred_colored)
                 ax4.set_title("Prediction HAB Class", fontsize=12, pad=10)
                 ax4.axis("off")
-                # Add discrete colorbar for model prediction
-                model_class_cmap = ListedColormap(model_custom_colormap / 255.0)
-                cbar4 = plt.colorbar(
-                    im4, ax=ax4, fraction=0.046, pad=0.04, ticks=[0, 1, 2, 3]
+
+                classed_colormap = np.array(
+                    [
+                        [149, 149, 149, 255],
+                        [236, 173, 10, 255],
+                        # [240, 168, 171, 255],
+                        # [225, 85, 102, 255],
+                        [169, 0, 0, 255],
+                        [0, 0, 0, 255],
+                    ]
                 )
-                cbar4.set_label("Class", rotation=270, labelpad=15)
-                cbar4.set_ticklabels(["0-99", "100-199", "200-253", ">253"])
+
+                cmap = matplotlib.colors.ListedColormap(
+                    [
+                        "#959595",
+                        "#ECAD0A",
+                        # "#F0A8AB",
+                        # "#E15566",
+                        "#A90000",
+                    ]
+                )
+                norm = matplotlib.colors.Normalize(vmin=0, vmax=len(class_designation))
+
+                divider = make_axes_locatable(ax4)
+                cax = divider.append_axes("right", size="5%", pad=0.05)
+                mappable = cm.ScalarMappable(cmap=cmap)
+                mappable.set_array([])
+                mappable.set_clim(-0.5, len(class_designation) + 0.5)
+                colorbar = fig.colorbar(
+                    mappable, cax=cax, orientation="vertical"
+                )  # , ticks=[0, 1, 2, 3, 4])
+                colorbar.set_ticks(
+                    np.linspace(0, len(class_designation), len(class_designation))
+                )
+                colorbar.set_ticklabels(["0-99", "100-199", "200-253"])
+
             else:
                 # Show overlay if no model prediction
                 ax4.imshow(sen2_rgb_filtered)
@@ -1124,8 +1222,9 @@ def get_and_display_cyan(
             ax1.set_title("CyAN Colored")
             ax1.axis("off")
 
-        plt.suptitle(f'Data for {current_date.strftime("%Y-%m-%d")}')
+        # plt.suptitle(f'Data for {current_date.strftime("%Y-%m-%d")}')
         plt.tight_layout()
+        save_plot(image_name)
         plt.show()
 
     if include_sentinel2:
@@ -1266,6 +1365,13 @@ def list_all_cached_products(sentinel2_cache_dir=None, cyan_cache_dir=None):
     return s2_files, cyan_files
 
 
+def save_plot(filename):
+    plt.savefig(f"new_images/{filename}.pdf", dpi=1000, bbox_inches="tight")
+    # plt.tight_layout()
+    plt.savefig(f"new_images/{filename}.png")
+    plt.savefig(f"new_images/{filename}.svg", format="svg")
+
+
 if __name__ == "__main__":
     from datetime import datetime
 
@@ -1277,6 +1383,7 @@ if __name__ == "__main__":
         42.207955,
     ]  # Example bounding box (Michigan area)
 
+    # Swan Lake 2019/7/2
     date = datetime(2019, 7, 2)
     bbox = [
         -85.972191,
@@ -1284,6 +1391,23 @@ if __name__ == "__main__":
         -85.941217,
         42.454071,
     ]  # Swan Lake
+
+    """
+        -81.501881,
+        27.472793,
+        -81.150606,
+        27.229292,
+    ]  # Lake Istokpoga
+    """
+    # Lake Istokpoga
+    date = datetime(2019, 7, 2)
+    bbox = [
+        # Lake Kissimmee
+        -81.369188,
+        28.000462,
+        -81.143271,
+        27.787651,
+    ]
 
     # Define cache directories first
     s2_cache_dir = "./my_sentinel2_cache"  # or None for default
@@ -1299,8 +1423,10 @@ if __name__ == "__main__":
         result = get_and_display_cyan(
             date,
             bbox,
-            region_id="6_2",
-            max_days_to_try=10,
+            "lake_istokpoga",
+            # region_id="6_2",
+            region_id="7_5",
+            max_days_to_try=30,
             include_sentinel2=True,
             sentinel2_cache_dir=s2_cache_dir,
             cyan_cache_dir=cyan_cache_dir,
